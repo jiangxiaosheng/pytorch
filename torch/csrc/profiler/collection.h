@@ -682,7 +682,7 @@ class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {
  public:
   CpuTraceSnapshot(const ProfilerConfig* config) : config_(config) {}
 
-  libkineto::CpuTraceBuffer process() override;
+  std::unique_ptr<libkineto::CpuTraceBuffer> process() override;
 
   void setTimeConverter(
       std::function<c10::time_t(c10::approx_time_t)>&& converter) {
@@ -699,6 +699,8 @@ class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {
     post_process_cb_ = std::move(cb);
   }
 
+  // void addCpuActivity(const std::shared_ptr<Result>& e);
+
  private:
   const ProfilerConfig* config_;
   ska::flat_hash_map<uint64_t, std::unique_ptr<ThreadLocalSubqueue>>
@@ -710,7 +712,8 @@ class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {
 
   friend class RecordQueue;
 
-  void passEventsToKineto(std::vector<std::shared_ptr<Result>>& results);
+  std::unique_ptr<libkineto::CpuTraceBuffer> addKinetoEvents(
+      std::vector<std::shared_ptr<Result>>& results);
 };
 
 TORCH_API bool get_record_concrete_inputs_enabled();

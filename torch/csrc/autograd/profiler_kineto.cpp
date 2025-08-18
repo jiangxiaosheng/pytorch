@@ -449,7 +449,6 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
     snapshot->setTimeConverter(std::move(converter));
     snapshot->setStartEndTime(startTime, end_time);
     snapshot->setPostProcessCb([this] (std::vector<std::shared_ptr<Result>>& events) {
-      std::vector<KinetoEvent> kinetoEvents;
       for (auto& e : events) {
         if (e->finished_) {
           // TODO: the callback seems to be empty in our case.
@@ -460,9 +459,8 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
               [this](ExtraFields<EventType::Backend>& i) { invokeCallback(i); },
               [](auto&) {}));
 
-          // TODO: adding to kinetoEvents may be unnecessary here, see if it can be optimized out.
-          kinetoEvents.emplace_back(e, config_.experimental_config.verbose);
-          AddTensorboardFields add_tb(e, kinetoEvents.back());
+          KinetoEvent ke(e, false);
+          AddTensorboardFields add_tb(e, ke);
           AddGenericMetadata add_generic(e, &config_);
 
           e->kineto_activity_ = nullptr;

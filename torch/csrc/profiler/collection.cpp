@@ -1559,11 +1559,9 @@ RecordQueue::getRecords(
   return {out, std::move(trace)};
 }
 
-// Most of the code is copied from getRecords, but they instead work on the local
-// data in the snapshot.
-libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
-  libkineto::CpuTraceBuffer cpu_buffer;
-
+// Most of the code is copied from getRecords, but they instead work on the
+// local data in the snapshot.
+std::unique_ptr<libkineto::CpuTraceBuffer> CpuTraceSnapshot::process() {
   auto time_converter = [&](c10::approx_time_t t) {
     return t == std::numeric_limits<c10::approx_time_t>::min()
         ? std::numeric_limits<c10::time_t>::min()
@@ -1572,11 +1570,11 @@ libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
 
   // Lambda that checks that only the right side of the base intersects with
   // ev_start and ev_end
-  auto right_intersection_only =
-      [&](ProfilerStepInfo base, int64_t ev_start, int64_t ev_end) {
-        return (base.start_time_ns < ev_start) &&
-            (base.end_time_ns <= ev_end && base.end_time_ns > ev_start);
-      };
+  // auto right_intersection_only =
+  //     [&](ProfilerStepInfo base, int64_t ev_start, int64_t ev_end) {
+  //       return (base.start_time_ns < ev_start) &&
+  //           (base.end_time_ns <= ev_end && base.end_time_ns > ev_start);
+  //     };
 
   std::vector<std::shared_ptr<Result>> out;
   std::vector<python_tracer::CompressedEvent> python_enters;
@@ -1607,7 +1605,11 @@ libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
         out, step_info, time_converter, queue.tid(), queue.kineto_info());
     materialize(queue.backend_events_);
     materialize_vulkan(
-        out, queue.vulkan_events_, time_converter, queue.tid(), queue.kineto_info());
+        out,
+        queue.vulkan_events_,
+        time_converter,
+        queue.tid(),
+        queue.kineto_info());
     for (auto& i : queue.allocations_) {
       out.emplace_back(Result::create(
           /*start_time_ns_=*/time_converter(i.start_time_),
@@ -1620,13 +1622,16 @@ libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
 
     for (auto& i : queue.py_calls_) {
       python_enters.push_back(
-          {i.first, queue.tid(), queue.kineto_info(), time_converter(i.second)});
+          {i.first,
+           queue.tid(),
+           queue.kineto_info(),
+           time_converter(i.second)});
     }
   }
 
   // FIXME: Python tracer is not handled yet
 
-  passEventsToKineto(out);
+  auto cpu_trace = addKinetoEvents(out);
 
   std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
     return a->start_time_ns_ < b->start_time_ns_;
@@ -1636,10 +1641,13 @@ libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
     calculateUniqueTensorIDs(out);
   }
 
-  return cpu_buffer;
+  return cpu_trace;
 }
 
-void CpuTraceSnapshot::passEventsToKineto(std::vector<std::shared_ptr<Result>>& results) {
+// Almost identical to addKinetoEvents(), but DO NOT transfer the trace to libkineto
+// here as we will handle that differently in libkineto from the snapshot.
+std::unique_ptr<libkineto::CpuTraceBuffer> CpuTraceSnapshot::addKinetoEvents(
+    std::vector<std::shared_ptr<Result>>& results) {
   using namespace torch::profiler::impl::kineto;
   TraceWrapper cpu_trace(
       static_cast<int64_t>(start_time_ns_), "PyTorch Profiler");
@@ -1671,8 +1679,8 @@ void CpuTraceSnapshot::passEventsToKineto(std::vector<std::shared_ptr<Result>>& 
     generateForwardBackwardLinks(cpu_trace.get(), results);
   }
 
-  // Kineto adds the events that it collected.
-  cpu_trace.transferCpuTrace(static_cast<int64_t>(end_time_ns_));
+  cpu_trace.get()->span.endTime = static_cast<int64_t>(end_time_ns_);
+  return std::move(cpu_trace.get());
 }
 
 namespace {
