@@ -91,9 +91,6 @@ void global_kineto_init() {
         /*cpuOnly=*/!(at::hasCUDA() || at::hasXPU() || at::hasMTIA()),
         /*logOnError=*/true);
     libkineto::api().suppressLogMessages();
-    if (c10::utils::get_env("KINETO_ORCA").has_value()) {
-      libkineto::api().setOrcaMode(true);
-    }
   }
 #endif
 }

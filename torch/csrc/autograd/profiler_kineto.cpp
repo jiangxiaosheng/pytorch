@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstring>
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <torch/csrc/autograd/profiler_kineto.h>
@@ -448,25 +449,31 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
     auto snapshot = recordQueue.getCpuTraceSnapshot();
     snapshot->setTimeConverter(std::move(converter));
     snapshot->setStartEndTime(startTime, end_time);
-    snapshot->setPostProcessCb([this] (std::vector<std::shared_ptr<Result>>& events) {
-      for (auto& e : events) {
-        if (e->finished_) {
-          // TODO: the callback seems to be empty in our case.
-          // If it's not empty, we should make sure it's safe to call it under libkineto's context
-          // especially there are typically multiple threads running it.
-          e->visit(c10::overloaded(
-              [this](ExtraFields<EventType::TorchOp>& i) { invokeCallback(i); },
-              [this](ExtraFields<EventType::Backend>& i) { invokeCallback(i); },
-              [](auto&) {}));
+    snapshot->setPostProcessCb(
+        [this](std::vector<std::shared_ptr<Result>>& events) {
+          for (auto& e : events) {
+            if (e->finished_) {
+              // TODO: the callback seems to be empty in our case.
+              // If it's not empty, we should make sure it's safe to call it
+              // under libkineto's context especially there are typically
+              // multiple threads running it.
+              e->visit(c10::overloaded(
+                  [this](ExtraFields<EventType::TorchOp>& i) {
+                    invokeCallback(i);
+                  },
+                  [this](ExtraFields<EventType::Backend>& i) {
+                    invokeCallback(i);
+                  },
+                  [](auto&) {}));
 
-          KinetoEvent ke(e, false);
-          AddTensorboardFields add_tb(e, ke);
-          AddGenericMetadata add_generic(e, &config_);
+              KinetoEvent ke(e, false);
+              AddTensorboardFields add_tb(e, ke);
+              AddGenericMetadata add_generic(e, &config_);
 
-          e->kineto_activity_ = nullptr;
-        }
-      }
-    });
+              e->kineto_activity_ = nullptr;
+            }
+          }
+        });
 
     startTime = getTimeNs();
     return snapshot;
@@ -772,6 +779,8 @@ void enableProfilerWithEventPostProcess(
   state_ptr->setEventPostProcessingCallback(std::move(cb));
 }
 
+static std::unordered_set<at::RecordScope> profiler_scopes;
+
 void enableProfiler(
     const torch::profiler::impl::ProfilerConfig& config,
     const std::set<torch::profiler::impl::ActivityType>& activities,
@@ -821,6 +830,8 @@ void enableProfiler(
     state_info_ptr->scopes = scopes;
     profiler_state_info_ptr = state_info_ptr;
   }
+
+  profiler_scopes = scopes;
 }
 
 bool isProfilerEnabledInMainThread() {
@@ -892,12 +903,13 @@ std::unique_ptr<ProfilerResult> disableProfiler() {
         std::move(trace),
         std::move(kineto_state_ptr->eventTree));
   }
+  profiler_scopes.clear();
 
   return result;
 }
 
 std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flushProfiler() {
-  auto state_ptr = KinetoThreadLocalState::get(/*global=*/true);
+  auto state_ptr = ProfilerStateBase::get(/*global=*/true);
   TORCH_CHECK(state_ptr, "Profiler is not enabled in main thread.");
   const auto& config = state_ptr->config();
   TORCH_CHECK(
@@ -905,7 +917,11 @@ std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flushProfiler() {
           libkineto::api().isOrcaMode(),
       "Flush is only supported in orca mode (on demand)");
 
-  auto cpu_trace_snapshot = state_ptr->flushTrace();
+  state_ptr->removeCallback();
+
+  auto cpu_trace_snapshot =
+      static_cast<KinetoThreadLocalState*>(state_ptr)->flushTrace();
+  pushProfilingCallbacks</*global=*/true>(profiler_scopes);
   return cpu_trace_snapshot;
 }
 
@@ -923,6 +939,7 @@ void shutdownProfiler() {
   auto kineto_state_ptr =
       std::static_pointer_cast<KinetoThreadLocalState>(state_ptr);
   kineto_state_ptr->shutdownTrace();
+  profiler_scopes.clear();
 }
 
 KinetoEvent::KinetoEvent(

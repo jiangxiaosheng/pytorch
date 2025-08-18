@@ -704,7 +704,7 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
   // Since we expect this to be the OVERWHELMINGLY common case (>99%), we add a
   // special thread_local cache so that we can skip the overall `flat_hash_map`
   // (and corresponding lock).
-  if (C10_LIKELY(!is_flushing_) && id_ == sub_queue_cache_.key_) {
+  if (id_ == sub_queue_cache_.key_) {
     return sub_queue_cache_.ref_;
   }
 
@@ -1639,6 +1639,12 @@ std::unique_ptr<libkineto::CpuTraceBuffer> CpuTraceSnapshot::process() {
 
   if (config_->report_input_shapes && config_->profile_memory) {
     calculateUniqueTensorIDs(out);
+  }
+
+  build_tree(out);
+
+  if (post_process_cb_) {
+    post_process_cb_(out);
   }
 
   return cpu_trace;
