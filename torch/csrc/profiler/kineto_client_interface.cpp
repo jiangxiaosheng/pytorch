@@ -55,7 +55,18 @@ class LibKinetoClient : public libkineto::ClientInterface {
   }
 
   void stop() override {
-    (void)disableProfiler();
+    if (libkineto::api().isOrcaMode()) {
+      shutdownProfiler();
+    } else {
+      (void)disableProfiler();
+    }
+  }
+
+  void flush() override {
+    TORCH_CHECK(
+        libkineto::api().isOrcaMode(),
+        "Flush is only supported in orca mode (on demand)");
+    flushProfiler();
   }
 
  private:

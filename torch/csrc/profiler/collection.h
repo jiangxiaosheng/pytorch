@@ -1,5 +1,6 @@
 #pragma once
 
+#include <libkineto.h>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -637,6 +638,8 @@ class TORCH_API ThreadLocalSubqueue {
       py_calls_;
 };
 
+class CpuTraceSnapshot;
+
 class TORCH_API RecordQueue {
  public:
   RecordQueue(ProfilerConfig config, std::set<ActivityType> activities);
@@ -655,6 +658,8 @@ class TORCH_API RecordQueue {
       uint64_t start_time_ns,
       uint64_t end_time_ns);
 
+  std::unique_ptr<CpuTraceSnapshot> getCpuTraceSnapshot();
+
  private:
   uint32_t id_;
   ProfilerConfig config_;
@@ -663,6 +668,28 @@ class TORCH_API RecordQueue {
       sub_queues_;
   std::mutex sub_queue_mutex_;
   std::unique_ptr<python_tracer::PythonTracerBase> python_tracer_;
+  // Add this flag to avoid race condition when the sub-queue is being written
+  // and being moved at the same time.
+  // This flag is checked every time the profiling hook gets called to add
+  // events to the queue. This will bring some overhead but it should generally
+  // be cheap as it's a single atomic load.
+  std::atomic<bool> is_flushing_{false};
+};
+
+class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {
+ public:
+  libkineto::CpuTraceBuffer process() override;
+
+  void setTimeConverter(std::function<c10::time_t(c10::approx_time_t)>&& converter) {
+    time_converter_ = std::move(converter);
+  }
+
+ private:
+  ska::flat_hash_map<uint64_t, std::unique_ptr<ThreadLocalSubqueue>>
+      sub_queues_;
+  std::function<c10::time_t(c10::approx_time_t)> time_converter_;
+
+  friend class RecordQueue;
 };
 
 TORCH_API bool get_record_concrete_inputs_enabled();

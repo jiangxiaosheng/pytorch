@@ -422,6 +422,10 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
 
     materializeOpEvents(records_and_trace.first);
 
+    if (config_.global()) {
+      return std::move(records_and_trace.second);
+    }
+
     // `kinetoEvents` does not include Python events. Instead it exposes them
     // via the `stacks` property.
     kinetoEvents.erase(
@@ -432,6 +436,16 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
         kinetoEvents.end());
 
     return std::move(records_and_trace.second);
+  }
+
+  void flushTrace() {
+    // TODO: Can we set up the time converter once and for all, or 
+    // at least not every time during the flush?
+    auto converter = clockConverter.makeConverter();
+    libkineto::get_time_converter() = converter;
+
+    auto snapshot = recordQueue.getCpuTraceSnapshot();
+    snapshot->setTimeConverter(std::move(converter));
   }
 
   template <typename T>
@@ -856,6 +870,17 @@ std::unique_ptr<ProfilerResult> disableProfiler() {
   }
 
   return result;
+}
+
+void flushProfiler() {
+  auto state_ptr = ProfilerStateBase::get(/*global=*/true);
+  TORCH_CHECK(state_ptr, "Profiler is not enabled in main thread.");
+  const auto& config = state_ptr->config();
+  TORCH_CHECK(config.state == ProfilerState::KINETO_ONDEMAND
+    && libkineto::api().isOrcaMode(),
+    "Flush is only supported in orca mode (on demand)");
+  
+  
 }
 
 KinetoEvent::KinetoEvent(

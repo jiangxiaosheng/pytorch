@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include "c10/macros/Export.h"
 
 #include <torch/csrc/profiler/api.h>
 #include <torch/csrc/profiler/events.h>
@@ -175,6 +176,13 @@ TORCH_API void enableProfilerWithEventPostProcess(
     const std::unordered_set<at::RecordScope>& scopes = {});
 
 TORCH_API std::unique_ptr<ProfilerResult> disableProfiler();
+
+// Different from disableProfiler, this function is used to just shutdown the profiler
+// without retrieving and processing the trace.
+TORCH_API void shutdownProfiler();
+
+// Drain the traces from the profiler on the fly and send it to libkineto.
+TORCH_API void flushProfiler();
 
 TORCH_API void prepareProfiler(
     const torch::profiler::impl::ProfilerConfig& config,

@@ -8,6 +8,7 @@
 #include <queue>
 #include <type_traits>
 #include <utility>
+#include "c10/macros/Macros.h"
 
 #include <fmt/format.h>
 
@@ -703,7 +704,7 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
   // Since we expect this to be the OVERWHELMINGLY common case (>99%), we add a
   // special thread_local cache so that we can skip the overall `flat_hash_map`
   // (and corresponding lock).
-  if (id_ == sub_queue_cache_.key_) {
+  if (C10_LIKELY(!is_flushing_) && id_ == sub_queue_cache_.key_) {
     return sub_queue_cache_.ref_;
   }
 
@@ -718,6 +719,21 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
 
   sub_queue_cache_ = SubQueueThreadCache{id_, it->second.get()};
   return it->second.get();
+}
+
+std::unique_ptr<CpuTraceSnapshot> RecordQueue::getCpuTraceSnapshot() {
+  is_flushing_ = true;
+  std::unique_ptr<CpuTraceSnapshot> snapshot;
+  {
+    // We must make this block as fast as possible to avoid blocking the
+    // profiling hooks as they're waiting on the mutex.
+    std::lock_guard<std::mutex> guard(sub_queue_mutex_);
+    snapshot->sub_queues_ = std::move(sub_queues_);
+    // Just to be safe, clear the sub-queues map.
+    sub_queues_.clear();
+  }
+  is_flushing_ = false;
+  return snapshot;
 }
 
 void RecordQueue::stop() {
@@ -796,56 +812,58 @@ void generateForwardBackwardLink(
 
 void generateForwardBackwardLinks(
     std::unique_ptr<torch::profiler::impl::kineto::trace_t>& cpu_trace,
-    const std::vector<std::shared_ptr<Result>>& results){
+    const std::vector<std::shared_ptr<Result>>& results) {
 #ifndef USE_KINETO
 }
 #else // USE_KINETO
-    TORCH_INTERNAL_ASSERT(cpu_trace->activities.size() == results.size());
+  TORCH_INTERNAL_ASSERT(cpu_trace->activities.size() == results.size());
 
-// startThreadId_seqNum to pointer of activity.
-// Low-16bits of startThreadId and low-48bits seqNum are concatenated into
-// one uint64_t variable as key.
+  // startThreadId_seqNum to pointer of activity.
+  // Low-16bits of startThreadId and low-48bits seqNum are concatenated into
+  // one uint64_t variable as key.
 
-std::unordered_map<uint64_t, libkineto::GenericTraceActivity*> tidSeq2activity;
-uint64_t fwd_bwd_link_id = 1;
+  std::unordered_map<uint64_t, libkineto::GenericTraceActivity*>
+      tidSeq2activity;
+  uint64_t fwd_bwd_link_id = 1;
 
-using result_activity_t = std::pair<Result*, libkineto::GenericTraceActivity*>;
-std::vector<result_activity_t> torch_events;
+  using result_activity_t =
+      std::pair<Result*, libkineto::GenericTraceActivity*>;
+  std::vector<result_activity_t> torch_events;
 
-for (const auto idx : c10::irange(cpu_trace->activities.size())) {
-  auto& profiler_result = results[idx];
-  auto& activity = cpu_trace->activities[idx];
+  for (const auto idx : c10::irange(cpu_trace->activities.size())) {
+    auto& profiler_result = results[idx];
+    auto& activity = cpu_trace->activities[idx];
 
-  // add information about an associated forward op, if a sequence number
-  // is available (e.g. during training)
+    // add information about an associated forward op, if a sequence number
+    // is available (e.g. during training)
 
-  profiler_result->visit_if_base<ExtraFields<EventType::TorchOp>>(
-      [&](const auto& e) {
-        if (e.sequence_number_ >= 0) {
-          torch_events.emplace_back(profiler_result.get(), activity.get());
-        }
+    profiler_result->visit_if_base<ExtraFields<EventType::TorchOp>>(
+        [&](const auto& e) {
+          if (e.sequence_number_ >= 0) {
+            torch_events.emplace_back(profiler_result.get(), activity.get());
+          }
+        });
+  }
+
+  // We need to visit the events in chronological order.
+  // So we sort them by end_time_ns_ before processing.
+  std::sort(
+      torch_events.begin(),
+      torch_events.end(),
+      [](const result_activity_t& left, const result_activity_t& right) {
+        auto left_end_time =
+            std::get<ExtraFields<EventType::TorchOp>>(left.first->extra_fields_)
+                .end_time_ns_;
+        auto right_end_time = std::get<ExtraFields<EventType::TorchOp>>(
+                                  right.first->extra_fields_)
+                                  .end_time_ns_;
+        return left_end_time < right_end_time;
       });
-}
 
-// We need to visit the events in chronological order.
-// So we sort them by end_time_ns_ before processing.
-std::sort(
-    torch_events.begin(),
-    torch_events.end(),
-    [](const result_activity_t& left, const result_activity_t& right) {
-      auto left_end_time =
-          std::get<ExtraFields<EventType::TorchOp>>(left.first->extra_fields_)
-              .end_time_ns_;
-      auto right_end_time =
-          std::get<ExtraFields<EventType::TorchOp>>(right.first->extra_fields_)
-              .end_time_ns_;
-      return left_end_time < right_end_time;
-    });
-
-for (auto& [profiler_result, activity] : torch_events) {
-  generateForwardBackwardLink(
-      *profiler_result, fwd_bwd_link_id, *activity, tidSeq2activity);
-}
+  for (auto& [profiler_result, activity] : torch_events) {
+    generateForwardBackwardLink(
+        *profiler_result, fwd_bwd_link_id, *activity, tidSeq2activity);
+  }
 }
 #endif // USE_KINETO
 
@@ -1539,6 +1557,38 @@ RecordQueue::getRecords(
 
   build_tree(out);
   return {out, std::move(trace)};
+}
+
+// Most of the code is copied from getRecords, but they instead work on the local
+// data in the snapshot.
+libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
+  libkineto::CpuTraceBuffer cpu_buffer;
+
+  auto time_converter = [&](c10::approx_time_t t) {
+    return t == std::numeric_limits<c10::approx_time_t>::min()
+        ? std::numeric_limits<c10::time_t>::min()
+        : time_converter_(t);
+  };
+
+  // Lambda that checks that only the right side of the base intersects with
+  // ev_start and ev_end
+  auto right_intersection_only =
+      [&](ProfilerStepInfo base, int64_t ev_start, int64_t ev_end) {
+        return (base.start_time_ns < ev_start) &&
+            (base.end_time_ns <= ev_end && base.end_time_ns > ev_start);
+      };
+
+  std::vector<std::shared_ptr<Result>> out;
+  std::vector<python_tracer::CompressedEvent> python_enters;
+  std::vector<ProfilerStepInfo> step_info;
+
+  for (auto& subqueue_it : sub_queues_) {
+    auto& queue = *subqueue_it.second;
+    auto materialize = [&](auto& events) {
+    };
+  }
+
+  return cpu_buffer;
 }
 
 namespace {
