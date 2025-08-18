@@ -723,7 +723,7 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
 
 std::unique_ptr<CpuTraceSnapshot> RecordQueue::getCpuTraceSnapshot() {
   is_flushing_ = true;
-  std::unique_ptr<CpuTraceSnapshot> snapshot;
+  auto snapshot = std::make_unique<CpuTraceSnapshot>(&config_);
   {
     // We must make this block as fast as possible to avoid blocking the
     // profiling hooks as they're waiting on the mutex.
@@ -1585,10 +1585,94 @@ libkineto::CpuTraceBuffer CpuTraceSnapshot::process() {
   for (auto& subqueue_it : sub_queues_) {
     auto& queue = *subqueue_it.second;
     auto materialize = [&](auto& events) {
+      for (auto& i : events) {
+        c10::time_t start_time_ns = 0;
+        if constexpr (std::is_same_v<
+                          std::remove_reference_t<decltype(i)>,
+                          ExtraFields<EventType::Backend>>) {
+          start_time_ns = i.start_time_us_ * 1000;
+        } else {
+          start_time_ns = time_converter(i.start_time_);
+        }
+        out.emplace_back(Result::create(
+            /*start_time_ns_=*/start_time_ns,
+            /*start_tid_=*/queue.tid(),
+            /*kineto_info_=*/queue.kineto_info(),
+            /*extra_fields_=*/std::move(i)));
+      }
+      events.clear();
     };
+
+    queue.torch_ops_.materialize(
+        out, step_info, time_converter, queue.tid(), queue.kineto_info());
+    materialize(queue.backend_events_);
+    materialize_vulkan(
+        out, queue.vulkan_events_, time_converter, queue.tid(), queue.kineto_info());
+    for (auto& i : queue.allocations_) {
+      out.emplace_back(Result::create(
+          /*start_time_ns_=*/time_converter(i.start_time_),
+          /*start_tid_=*/queue.tid(),
+          /*kineto_info_=*/queue.kineto_info(),
+          /*extra_fields_=*/ExtraFields<EventType::Allocation>(i)));
+    }
+    queue.allocations_.clear();
+    materialize(queue.ooms_);
+
+    for (auto& i : queue.py_calls_) {
+      python_enters.push_back(
+          {i.first, queue.tid(), queue.kineto_info(), time_converter(i.second)});
+    }
+  }
+
+  // FIXME: Python tracer is not handled yet
+
+  passEventsToKineto(out);
+
+  std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+    return a->start_time_ns_ < b->start_time_ns_;
+  });
+
+  if (config_->report_input_shapes && config_->profile_memory) {
+    calculateUniqueTensorIDs(out);
   }
 
   return cpu_buffer;
+}
+
+void CpuTraceSnapshot::passEventsToKineto(std::vector<std::shared_ptr<Result>>& results) {
+  using namespace torch::profiler::impl::kineto;
+  TraceWrapper cpu_trace(
+      static_cast<int64_t>(start_time_ns_), "PyTorch Profiler");
+
+  // Generate Kineto events for each event recorded by the PyTorch profiler.
+  for (const auto i : c10::irange(results.size())) {
+    const auto& e = results[i];
+    // (TODO): This is a temporary fix for async traces to make sure that we do
+    // not use int64 MIN as end time in Kineto. If we use that value, the
+    // duration will overflow and become a very large positive number. For a
+    // long term solution, add guards in kineto for each activity type
+    int64_t act_end_time = std::max(e->endTimeNS(), e->start_time_ns_);
+    auto* activity = cpu_trace.addCPUActivity(
+        e->name(),
+        e->kinetoType(),
+        e->kineto_info_,
+        e->correlationID(),
+        e->start_time_ns_,
+        act_end_time);
+
+    TORCH_INTERNAL_ASSERT(activity || !kKinetoAvailable);
+    if (activity) {
+      addMetadata(activity, indexKey, std::to_string(i));
+      e->kineto_activity_ = activity;
+    }
+  }
+
+  if (get_fwd_bwd_enabled()) {
+    generateForwardBackwardLinks(cpu_trace.get(), results);
+  }
+
+  // Kineto adds the events that it collected.
+  cpu_trace.transferCpuTrace(static_cast<int64_t>(end_time_ns_));
 }
 
 namespace {

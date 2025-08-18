@@ -9,6 +9,10 @@
 #include <torch/csrc/profiler/stubs/base.h>
 #include <torch/csrc/profiler/util.h>
 
+namespace libkineto {
+class CpuTraceSnapshotInterface;
+} // namespace libkineto
+
 namespace torch {
 
 namespace profiler::impl {
@@ -177,12 +181,12 @@ TORCH_API void enableProfilerWithEventPostProcess(
 
 TORCH_API std::unique_ptr<ProfilerResult> disableProfiler();
 
-// Different from disableProfiler, this function is used to just shutdown the profiler
-// without retrieving and processing the trace.
+// Different from disableProfiler, this function is used to just shutdown the
+// profiler without retrieving and processing the trace.
 TORCH_API void shutdownProfiler();
 
 // Drain the traces from the profiler on the fly and send it to libkineto.
-TORCH_API void flushProfiler();
+TORCH_API std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flushProfiler();
 
 TORCH_API void prepareProfiler(
     const torch::profiler::impl::ProfilerConfig& config,

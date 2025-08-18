@@ -568,6 +568,8 @@ class TORCH_API ThreadLocalSubqueue {
   // See `containers.h` for block size benchmarks.
   static constexpr size_t BlockSize = 512;
 
+  friend class CpuTraceSnapshot;
+
   struct TorchOpStorage {
     // NB: This is a destructive operation.
     void materialize(
@@ -678,18 +680,37 @@ class TORCH_API RecordQueue {
 
 class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {
  public:
+  CpuTraceSnapshot(const ProfilerConfig* config) : config_(config) {}
+
   libkineto::CpuTraceBuffer process() override;
 
-  void setTimeConverter(std::function<c10::time_t(c10::approx_time_t)>&& converter) {
+  void setTimeConverter(
+      std::function<c10::time_t(c10::approx_time_t)>&& converter) {
     time_converter_ = std::move(converter);
   }
 
+  void setStartEndTime(uint64_t start_time_ns, uint64_t end_time_ns) {
+    start_time_ns_ = start_time_ns;
+    end_time_ns_ = end_time_ns;
+  }
+
+  void setPostProcessCb(
+      std::function<void(std::vector<std::shared_ptr<Result>>&)>&& cb) {
+    post_process_cb_ = std::move(cb);
+  }
+
  private:
+  const ProfilerConfig* config_;
   ska::flat_hash_map<uint64_t, std::unique_ptr<ThreadLocalSubqueue>>
       sub_queues_;
   std::function<c10::time_t(c10::approx_time_t)> time_converter_;
+  uint64_t start_time_ns_{0};
+  uint64_t end_time_ns_{0};
+  std::function<void(std::vector<std::shared_ptr<Result>>&)> post_process_cb_;
 
   friend class RecordQueue;
+
+  void passEventsToKineto(std::vector<std::shared_ptr<Result>>& results);
 };
 
 TORCH_API bool get_record_concrete_inputs_enabled();

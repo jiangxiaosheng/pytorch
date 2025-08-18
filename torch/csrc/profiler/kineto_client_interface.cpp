@@ -62,11 +62,12 @@ class LibKinetoClient : public libkineto::ClientInterface {
     }
   }
 
-  void flush() override {
+  std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flush() override {
     TORCH_CHECK(
         libkineto::api().isOrcaMode(),
         "Flush is only supported in orca mode (on demand)");
-    flushProfiler();
+    auto snapshot = flushProfiler();
+    return snapshot;
   }
 
  private:
