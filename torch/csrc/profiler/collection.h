@@ -670,12 +670,6 @@ class TORCH_API RecordQueue {
       sub_queues_;
   std::mutex sub_queue_mutex_;
   std::unique_ptr<python_tracer::PythonTracerBase> python_tracer_;
-  // Add this flag to avoid race condition when the sub-queue is being written
-  // and being moved at the same time.
-  // This flag is checked every time the profiling hook gets called to add
-  // events to the queue. This will bring some overhead but it should generally
-  // be cheap as it's a single atomic load.
-  std::atomic<bool> is_flushing_{false};
 };
 
 class CpuTraceSnapshot : public libkineto::CpuTraceSnapshotInterface {

@@ -551,6 +551,10 @@ struct SubQueueThreadCache {
 // `sub_queue_cache_` and fall back to a different mechanism.
 std::atomic<uint32_t> queue_id_{0};
 thread_local SubQueueThreadCache sub_queue_cache_{0, nullptr};
+// Since the sub queue cache is thread local, we need to use a global version
+// to track when the cache is invalidated.
+uint32_t global_subqueue_cache_version_{0};
+thread_local uint32_t local_subqueue_cache_version_{0};
 
 std::string toString(const ExtraFields<EventType::PyCall>& e) {
   if (e.module_.has_value()) {
@@ -704,9 +708,12 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
   // Since we expect this to be the OVERWHELMINGLY common case (>99%), we add a
   // special thread_local cache so that we can skip the overall `flat_hash_map`
   // (and corresponding lock).
-  if (id_ == sub_queue_cache_.key_) {
-    return sub_queue_cache_.ref_;
+  if (local_subqueue_cache_version_ == global_subqueue_cache_version_) {
+    if (id_ == sub_queue_cache_.key_) {
+      return sub_queue_cache_.ref_;
+    }
   }
+  local_subqueue_cache_version_ = global_subqueue_cache_version_;
 
   const auto tid = at::RecordFunction::currentThreadId();
   std::lock_guard<std::mutex> guard(sub_queue_mutex_);
@@ -722,17 +729,14 @@ ThreadLocalSubqueue* RecordQueue::getSubqueue() {
 }
 
 std::unique_ptr<CpuTraceSnapshot> RecordQueue::getCpuTraceSnapshot() {
-  is_flushing_ = true;
   auto snapshot = std::make_unique<CpuTraceSnapshot>(&config_);
-  {
-    // We must make this block as fast as possible to avoid blocking the
-    // profiling hooks as they're waiting on the mutex.
-    std::lock_guard<std::mutex> guard(sub_queue_mutex_);
-    snapshot->sub_queues_ = std::move(sub_queues_);
-    // Just to be safe, clear the sub-queues map.
-    sub_queues_.clear();
-  }
-  is_flushing_ = false;
+  // We probably don't need to lock here, just to be safe and it doesn't have any
+  // performance impact.
+  std::lock_guard<std::mutex> guard(sub_queue_mutex_);
+  snapshot->sub_queues_ = std::move(sub_queues_);
+  TORCH_CHECK(
+      sub_queues_.empty(), "Sub queues map should be empty after move");
+  global_subqueue_cache_version_++;
   return snapshot;
 }
 
@@ -1650,8 +1654,9 @@ std::unique_ptr<libkineto::CpuTraceBuffer> CpuTraceSnapshot::process() {
   return cpu_trace;
 }
 
-// Almost identical to addKinetoEvents(), but DO NOT transfer the trace to libkineto
-// here as we will handle that differently in libkineto from the snapshot.
+// Almost identical to addKinetoEvents(), but DO NOT transfer the trace to
+// libkineto here as we will handle that differently in libkineto from the
+// snapshot.
 std::unique_ptr<libkineto::CpuTraceBuffer> CpuTraceSnapshot::addKinetoEvents(
     std::vector<std::shared_ptr<Result>>& results) {
   using namespace torch::profiler::impl::kineto;

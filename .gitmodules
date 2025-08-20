@@ -97,6 +97,7 @@
     path = third_party/kineto
     # url = https://github.com/pytorch/kineto
     url = https://github.com/jiangxiaosheng/kineto.git
+    branch = orca
 [submodule "third_party/pocketfft"]
 	path = third_party/pocketfft
 	url = https://github.com/mreineck/pocketfft

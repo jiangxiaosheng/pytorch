@@ -779,8 +779,6 @@ void enableProfilerWithEventPostProcess(
   state_ptr->setEventPostProcessingCallback(std::move(cb));
 }
 
-static std::unordered_set<at::RecordScope> profiler_scopes;
-
 void enableProfiler(
     const torch::profiler::impl::ProfilerConfig& config,
     const std::set<torch::profiler::impl::ActivityType>& activities,
@@ -830,8 +828,6 @@ void enableProfiler(
     state_info_ptr->scopes = scopes;
     profiler_state_info_ptr = state_info_ptr;
   }
-
-  profiler_scopes = scopes;
 }
 
 bool isProfilerEnabledInMainThread() {
@@ -903,25 +899,20 @@ std::unique_ptr<ProfilerResult> disableProfiler() {
         std::move(trace),
         std::move(kineto_state_ptr->eventTree));
   }
-  profiler_scopes.clear();
 
   return result;
 }
 
 std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flushProfiler() {
-  auto state_ptr = ProfilerStateBase::get(/*global=*/true);
-  TORCH_CHECK(state_ptr, "Profiler is not enabled in main thread.");
-  const auto& config = state_ptr->config();
+  auto kineto_state_ptr = KinetoThreadLocalState::get(/*global=*/true);
+  TORCH_CHECK(kineto_state_ptr, "Profiler is not enabled in main thread.");
+  const auto& config = kineto_state_ptr->config();
   TORCH_CHECK(
       config.state == ProfilerState::KINETO_ONDEMAND &&
           libkineto::api().isOrcaMode(),
       "Flush is only supported in orca mode (on demand)");
 
-  state_ptr->removeCallback();
-
-  auto cpu_trace_snapshot =
-      static_cast<KinetoThreadLocalState*>(state_ptr)->flushTrace();
-  pushProfilingCallbacks</*global=*/true>(profiler_scopes);
+  auto cpu_trace_snapshot = kineto_state_ptr->flushTrace();
   return cpu_trace_snapshot;
 }
 
@@ -939,7 +930,6 @@ void shutdownProfiler() {
   auto kineto_state_ptr =
       std::static_pointer_cast<KinetoThreadLocalState>(state_ptr);
   kineto_state_ptr->shutdownTrace();
-  profiler_scopes.clear();
 }
 
 KinetoEvent::KinetoEvent(
