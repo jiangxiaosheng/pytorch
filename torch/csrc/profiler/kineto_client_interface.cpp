@@ -3,8 +3,6 @@
 #include <libkineto.h>
 #include <torch/csrc/autograd/profiler_kineto.h>
 #include <torch/csrc/profiler/kineto_client_interface.h>
-#include <chrono>
-#include <thread>
 
 // Ondemand tracing is not supported on Apple or edge platform
 #if defined(__APPLE__) || defined(EDGE_PROFILER_USE_KINETO)
@@ -55,19 +53,16 @@ class LibKinetoClient : public libkineto::ClientInterface {
   }
 
   void stop() override {
-    if (libkineto::api().isOrcaMode()) {
-      shutdownProfiler();
-    } else {
-      (void)disableProfiler();
-    }
+    (void)disableProfiler();
   }
 
   std::unique_ptr<libkineto::CpuTraceSnapshotInterface> flush() override {
-    TORCH_CHECK(
-        libkineto::api().isOrcaMode(),
-        "Flush is only supported in orca mode (on demand)");
     auto snapshot = flushProfiler();
     return snapshot;
+  }
+
+  void shutdown() override {
+    shutdownProfiler();
   }
 
  private:
